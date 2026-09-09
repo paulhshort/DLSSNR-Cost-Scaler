@@ -201,10 +201,12 @@ Float4 cpu_bilinear_clamp(const std::vector<Float4>& source, uint32_t sw, uint32
     const float sy = v * static_cast<float>(sh) - 0.5f;
     const float fx0 = std::floor(sx);
     const float fy0 = std::floor(sy);
-    const int x0 = std::max(0, std::min(static_cast<int>(sw) - 1, static_cast<int>(fx0)));
-    const int y0 = std::max(0, std::min(static_cast<int>(sh) - 1, static_cast<int>(fy0)));
-    const int x1 = std::max(0, std::min(static_cast<int>(sw) - 1, x0 + 1));
-    const int y1 = std::max(0, std::min(static_cast<int>(sh) - 1, y0 + 1));
+    const int rawX0 = static_cast<int>(fx0);
+    const int rawY0 = static_cast<int>(fy0);
+    const int x0 = std::max(0, std::min(static_cast<int>(sw) - 1, rawX0));
+    const int y0 = std::max(0, std::min(static_cast<int>(sh) - 1, rawY0));
+    const int x1 = std::max(0, std::min(static_cast<int>(sw) - 1, rawX0 + 1));
+    const int y1 = std::max(0, std::min(static_cast<int>(sh) - 1, rawY0 + 1));
     const float tx = sx - fx0;
     const float ty = sy - fy0;
 
@@ -486,6 +488,23 @@ void test_filter1_constant_and_native_identity(Harness& h) {
     require_close(filtered, legacy, 1.0e-6f, "filter1 native dimensions must keep legacy sampling");
 }
 
+void test_cpu_bilinear_reference_clamps_raw_neighbors() {
+    const std::vector<Float4> src = {
+        Float4{0.0f, 0.0f, 0.0f, 0.0f},
+        Float4{1.0f, 0.0f, 0.0f, 0.0f},
+        Float4{0.0f, 1.0f, 0.0f, 0.0f},
+        Float4{1.0f, 1.0f, 0.0f, 0.0f},
+    };
+
+    // This coordinate produces floor(u * width - 0.5) == -1. D3D clamp addressing clamps the raw
+    // neighbor indices independently, so x0 and x1 both become 0. Computing x1 from the already
+    // clamped x0 would incorrectly blend texel 1 at the border.
+    const Float4 left_edge = cpu_bilinear_clamp(src, 2, 2, 0.10f, 0.50f);
+    if (rel_error(left_edge.r, 0.0f) > 1.0e-6f || rel_error(left_edge.g, 0.5f) > 1.0e-6f) {
+        fail("CPU bilinear reference must clamp raw border neighbors independently");
+    }
+}
+
 void test_filter1_matches_cpu_reference(Harness& h) {
     struct Case { uint32_t sw, sh, dw, dh; const char* label; };
     const Case cases[] = {
@@ -606,6 +625,7 @@ int run_all_tests() {
     test_resolve_reflection(h); ++tests;
     test_filter0_legacy_parity(h); ++tests;
     test_filter1_constant_and_native_identity(h); ++tests;
+    test_cpu_bilinear_reference_clamps_raw_neighbors(); ++tests;
     test_filter1_matches_cpu_reference(h); ++tests;
     test_filter1_nonconstant_no_shrink_parity(h); ++tests;
     test_filter1_reduces_stripe_alias_when_shrinking(h); ++tests;
