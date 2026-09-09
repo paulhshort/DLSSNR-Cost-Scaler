@@ -16,6 +16,7 @@
 #include "Downsample_Shader.h"
 #include "Resolve_Shader.h"
 #include "dlssnr_shared.h"
+#include "NrRouting.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -64,6 +65,8 @@ static std::atomic<float>    g_scale(0.75f);
 static std::atomic<bool>     g_enableAnamorphic(false);
 static std::atomic<float>    g_scaleX(0.65f);
 static std::atomic<float>    g_scaleY(0.85f);
+static std::atomic<uint32_t> g_downsampleFilter(0);
+static std::atomic<bool>     g_processAtNativeResolution(false);
 static std::atomic<uint32_t> g_enlargementMode(1);     // 1 = Matched Residual, 0 = Classic Bilinear
 static std::atomic<float>    g_transferStrength(1.0f); // 0.0 to 2.0
 static std::atomic<float>    g_sharpness(0.20f);       // 0.0 to 1.0 (RCAS)
@@ -93,8 +96,21 @@ static uint32_t            s_lastProxySharedVersion = 0;
 static void InitProxySharedMemory() {
     if (g_proxySharedConfig) return;
     g_hProxySharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DlssnrSharedConfig), DLSSNR_SHARED_MEM_NAME);
+    DWORD mappingError = GetLastError();
     if (g_hProxySharedMem) {
         g_proxySharedConfig = (DlssnrSharedConfig*)MapViewOfFile(g_hProxySharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DlssnrSharedConfig));
+        if (!g_proxySharedConfig) {
+            Log("[Proxy] MapViewOfFile failed for lab shared config (CreateFileMappingW error=%lu, MapViewOfFile error=%lu)", mappingError, GetLastError());
+            CloseHandle(g_hProxySharedMem);
+            g_hProxySharedMem = nullptr;
+        } else if (g_proxySharedConfig->magic != DLSSNR_MAGIC) {
+            ZeroMemory(g_proxySharedConfig, sizeof(DlssnrSharedConfig));
+            g_proxySharedConfig->magic = DLSSNR_MAGIC;
+            g_proxySharedConfig->version = 1;
+            s_lastProxySharedVersion = g_proxySharedConfig->version;
+        }
+    } else {
+        Log("[Proxy] CreateFileMappingW failed for lab shared config (error=%lu)", mappingError);
     }
 }
 
@@ -156,6 +172,11 @@ static void LoadConfig() {
     g_scaleY.store(syVal);
 
     g_enableProxy.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableProxy", 1, g_iniPath) != 0);
+    int downsampleFilter = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"DownsampleFilter", 0, g_iniPath);
+    if (downsampleFilter < 0) downsampleFilter = 0;
+    if (downsampleFilter > 1) downsampleFilter = 1;
+    g_downsampleFilter.store((uint32_t)downsampleFilter);
+    g_processAtNativeResolution.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"ProcessAtNativeResolution", 0, g_iniPath) != 0);
     g_enableHotkeys = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableHotkeys", 1, g_iniPath) != 0);
 
     g_enlargementMode.store((uint32_t)GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnlargementMode", 1, g_iniPath));
@@ -207,8 +228,8 @@ static void LoadConfig() {
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
-        g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), DownsampleFilter=%u, ProcessAtNativeResolution=%d, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
+        g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_downsampleFilter.load(), g_processAtNativeResolution.load() ? 1 : 0, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
 
     PushProxyToSharedMemory();
 }
@@ -220,6 +241,8 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->enableAnamorphic = g_enableAnamorphic.load() ? 1 : 0;
     g_proxySharedConfig->scaleX = g_scaleX.load();
     g_proxySharedConfig->scaleY = g_scaleY.load();
+    g_proxySharedConfig->downsampleFilter = g_downsampleFilter.load();
+    g_proxySharedConfig->processAtNativeResolution = g_processAtNativeResolution.load() ? 1 : 0;
     g_proxySharedConfig->enlargementMode = g_enlargementMode.load();
     g_proxySharedConfig->transferStrength = g_transferStrength.load();
     g_proxySharedConfig->colorStrength = g_colorStrength.load();
@@ -253,10 +276,13 @@ static void CheckConfigHotReload() {
         if (g_proxySharedConfig->version != s_lastProxySharedVersion) {
             if (g_proxySharedConfig->writerSource != 2) {
                 g_enableProxy.store(g_proxySharedConfig->enableProxy != 0);
-                g_scale.store(g_proxySharedConfig->resolutionScale);
+                g_scale.store(dlssnr_lab::ClampScale(g_proxySharedConfig->resolutionScale));
                 g_enableAnamorphic.store(g_proxySharedConfig->enableAnamorphic != 0);
-                g_scaleX.store(g_proxySharedConfig->scaleX);
-                g_scaleY.store(g_proxySharedConfig->scaleY);
+                g_scaleX.store(dlssnr_lab::ClampScale(g_proxySharedConfig->scaleX));
+                g_scaleY.store(dlssnr_lab::ClampScale(g_proxySharedConfig->scaleY));
+                uint32_t sharedDownsampleFilter = g_proxySharedConfig->downsampleFilter > 1 ? 1u : g_proxySharedConfig->downsampleFilter;
+                g_downsampleFilter.store(sharedDownsampleFilter);
+                g_processAtNativeResolution.store(g_proxySharedConfig->processAtNativeResolution != 0);
                 g_enlargementMode.store(g_proxySharedConfig->enlargementMode);
                 g_transferStrength.store(g_proxySharedConfig->transferStrength);
                 g_colorStrength.store(g_proxySharedConfig->colorStrength);
@@ -511,6 +537,7 @@ struct DownsampleConstants {
     uint32_t srcHeight;
     uint32_t dstWidth;
     uint32_t dstHeight;
+    uint32_t downsampleFilter;
 };
 
 struct ResolveConstants {
@@ -680,7 +707,7 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
         downParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         downParams[0].Constants.ShaderRegister = 0;
         downParams[0].Constants.RegisterSpace = 0;
-        downParams[0].Constants.Num32BitValues = 4;
+        downParams[0].Constants.Num32BitValues = 5;
         downParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         downParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -971,15 +998,19 @@ static int EvaluateFeatureInternal(
     DXGI_FORMAT typedColorFormat = ToNonTypeless(colorDesc.Format);
     float currentScale = g_scale.load();
     bool isAnamorphic = g_enableAnamorphic.load();
-    float currentScaleX = isAnamorphic ? g_scaleX.load() : currentScale;
-    float currentScaleY = isAnamorphic ? g_scaleY.load() : currentScale;
+    dlssnr_lab::ScaleConfig routeConfig;
+    routeConfig.enableProxy = g_enableProxy.load();
+    routeConfig.enableAnamorphic = isAnamorphic;
+    routeConfig.processAtNativeResolution = g_processAtNativeResolution.load();
+    routeConfig.resolutionScale = currentScale;
+    routeConfig.scaleX = g_scaleX.load();
+    routeConfig.scaleY = g_scaleY.load();
+    dlssnr_lab::RouteDecision route = dlssnr_lab::DecideRoute(routeConfig, nativeW, nativeH);
+    float currentScaleX = route.effectiveScaleX;
+    float currentScaleY = route.effectiveScaleY;
 
-    // Match the native-size tolerance used for workW/workH in both scaling modes.
-    bool isNativePassthrough =
-        (fabsf(currentScaleX - 1.0f) < 0.005f && fabsf(currentScaleY - 1.0f) < 0.005f);
-
-    // Pass through directly to real DLL when proxy is disabled OR scale is 100% native
-    if (!g_enableProxy.load() || isNativePassthrough) {
+    // Pass through directly to real DLL when proxy is disabled or native-sized private processing is not requested.
+    if (!route.usePrivatePath) {
         if (g_proxySharedConfig && g_proxySharedConfig->magic == DLSSNR_MAGIC) {
             g_proxySharedConfig->debugNativeW = nativeW;
             g_proxySharedConfig->debugNativeH = nativeH;
@@ -1025,10 +1056,8 @@ static int EvaluateFeatureInternal(
         return real_Evaluate(InCmdList, InFeatureHandle, InParameters, InCallback);
     }
 
-    uint32_t workW = (fabsf(currentScaleX - 1.0f) < 0.005f) ? nativeW : (((uint32_t)roundf(nativeW * currentScaleX)) & ~1);
-    uint32_t workH = (fabsf(currentScaleY - 1.0f) < 0.005f) ? nativeH : (((uint32_t)roundf(nativeH * currentScaleY)) & ~1);
-    if (workW < 64) workW = 64;
-    if (workH < 64) workH = 64;
+    uint32_t workW = route.workW;
+    uint32_t workH = route.workH;
 
     DXGI_FORMAT typedOutFormat = ToNonTypeless(outDesc.Format);
     DXGI_FORMAT scratchFormat = GetUavSafeScratchFormat(typedColorFormat);
@@ -1110,9 +1139,11 @@ static int EvaluateFeatureInternal(
     slot->nativeW = nativeW;
     slot->nativeH = nativeH;
 
-    bool isScalingActive = (workW != nativeW || workH != nativeH);
+    bool usePrivatePath = route.usePrivatePath;
+    bool isScalingActive = route.isScalingActive;
+    bool isNativePrivatePath = route.processAtNativeResolution;
 
-    if (isScalingActive) {
+    if (usePrivatePath) {
         if (!slot->colorSmall || slot->workW != workW || slot->workH != workH) {
             ULONGLONG now = GetTickCount64();
             if (slot->allocFailed && (now - slot->lastAllocAttemptTick < 2000)) {
@@ -1148,8 +1179,8 @@ static int EvaluateFeatureInternal(
                     slot->workH = workH;
                     slot->scratchFormat = scratchFormat;
                     needRecreate = true;
-                    Log("[Proxy] Allocated slot %u textures: work=%ux%u, native=%ux%u (Format=%d, ScratchFormat=%d, Scale=%.2f, ScaleX=%.2f, ScaleY=%.2f)",
-                        currentPass, workW, workH, nativeW, nativeH, typedColorFormat, scratchFormat, currentScale, currentScaleX, currentScaleY);
+                    Log("[Proxy] Allocated slot %u textures: work=%ux%u, native=%ux%u (Format=%d, ScratchFormat=%d, Scale=%.2f, ScaleX=%.2f, ScaleY=%.2f, NativeProcess=%d)",
+                        currentPass, workW, workH, nativeW, nativeH, typedColorFormat, scratchFormat, currentScale, currentScaleX, currentScaleY, isNativePrivatePath ? 1 : 0);
                 }
             }
         }
@@ -1230,7 +1261,7 @@ static int EvaluateFeatureInternal(
             params->Set("DLSSNR.MVecSubrectHeight", mH);
         }
 
-        if (isScalingActive) {
+        if (usePrivatePath) {
             params->Set("DLSSNR.Color", slot->colorSmall);
             params->Set("DLSSNR.Output", slot->outputSmall);
         } else {
@@ -1251,8 +1282,8 @@ static int EvaluateFeatureInternal(
         }
 
         int createRes = real_Create(InCmdList, 18, params, &slot->activeFeature);
-        Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f, scaleX=%.2f, scaleY=%.2f): res=0x%X, handle=%p",
-            currentPass, workW, workH, nativeW, nativeH, currentScale, currentScaleX, currentScaleY, createRes, slot->activeFeature);
+        Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f, scaleX=%.2f, scaleY=%.2f, NativeProcess=%d): res=0x%X, handle=%p",
+            currentPass, workW, workH, nativeW, nativeH, currentScale, currentScaleX, currentScaleY, isNativePrivatePath ? 1 : 0, createRes, slot->activeFeature);
 
         params->Set("DLSSNR.Color", origColor);
         params->Set("DLSSNR.Output", origOutput);
@@ -1470,8 +1501,8 @@ static int EvaluateFeatureInternal(
         InCmdList->SetComputeRootSignature(g_rootSigDownsample);
         InCmdList->SetDescriptorHeaps(1, heaps);
 
-        DownsampleConstants downConstants = { nativeW, nativeH, workW, workH };
-        InCmdList->SetComputeRoot32BitConstants(0, 4, &downConstants, 0);
+        DownsampleConstants downConstants = { nativeW, nativeH, workW, workH, g_downsampleFilter.load() };
+        InCmdList->SetComputeRoot32BitConstants(0, 5, &downConstants, 0);
         InCmdList->SetComputeRootDescriptorTable(1, gpuHandleDown);
         InCmdList->SetPipelineState(g_psoDownsample);
         InCmdList->Dispatch((workW + 7) / 8, (workH + 7) / 8, 1);

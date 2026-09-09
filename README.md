@@ -1,3 +1,11 @@
+# Personal Cost Scaler Lab branch
+
+This branch adds independent look/resolution presets, optional input prefiltering, and optional resolve processing at 100% NR. It includes the supersampling fix from upstream PR #8. It is an experimental personal build, not an upstream release.
+
+Read [the home test guide](docs/lab/START-HERE.md). Build and validate with `./scripts/Build-Lab.ps1` on a disposable Windows runner; local CPU-only development uses `-CpuOnly -NoPackage`. Packages include the source commit, shader bytecode checks, and test evidence. No model, ShortFuse binary, or game is included.
+
+The original upstream README follows.
+
 # DLSSNR-Cost-Scaler
 
 A standalone proxy DLL for NVIDIA DLSS-NR (DirectX 12) that adds resolution scaling and cost control. It runs the neural reconstruction model at a reduced resolution while keeping native 1:1 geometry, fine textures, text, and edges intact using a high-frequency matched residual composite shader.

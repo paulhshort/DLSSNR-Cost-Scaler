@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <cstdint>
 
-#define DLSSNR_SHARED_MEM_NAME L"Local\\DLSSNR_Config_Shared_v1"
+#define DLSSNR_SHARED_MEM_NAME L"Local\\DLSSNR_Lab_Config_20260909_v1"
 #define DLSSNR_MAGIC 0x524E5344 // 'DSNR'
 
 #pragma pack(push, 4)
@@ -11,7 +11,7 @@ struct DlssnrSharedConfig {
     uint32_t magic;            // DLSSNR_MAGIC
     uint32_t version;          // Monotonically increasing version counter
     uint32_t enableProxy;      // 1 = Active, 0 = Bypassed
-    float    resolutionScale;  // 0.25 to 1.00
+    float    resolutionScale;  // 0.25 to 2.00
     uint32_t enlargementMode;  // 1 = Matched Residual, 0 = Bilinear Direct
     float    transferStrength; // 0.0 to 2.0
     float    colorStrength;    // 0.0 to 1.0
@@ -32,6 +32,8 @@ struct DlssnrSharedConfig {
     uint32_t enableAnamorphic;         // 0 = Off (uniform scale), 1 = On (asymmetric scale)
     float    scaleX;                   // Horizontal scale (0.25 to 2.00)
     float    scaleY;                   // Vertical scale (0.25 to 2.00)
+    uint32_t downsampleFilter;         // 0 = bilinear sample, 1 = shrinking-axis prefilter
+    uint32_t processAtNativeResolution;// 0 = stock 100% passthrough, 1 = private path at native work size
 
     // Official DLSS-NR Model Settings
     uint32_t nrStyle;                  // 0 = Balanced, 1 = Sharp, 2 = Cinematic
@@ -58,4 +60,3 @@ struct DlssnrSharedConfig {
     uint32_t debugVrnrSkippedThisFrame;// 1 if real_Evaluate was skipped this frame
 };
 #pragma pack(pop)
-

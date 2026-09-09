@@ -13,9 +13,10 @@
 #include "imgui.h"
 #include "reshade.hpp"
 #include "dlssnr_shared.h"
+#include "../lab_presets.h"
 
-extern "C" __declspec(dllexport) const char* NAME = "DLSS-NR Cost Scaler";
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "Live configuration overlay for the DLSSNR-Cost-Scaler proxy.";
+extern "C" __declspec(dllexport) const char* NAME = "Cost Scaler Lab - 2026-09-09";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "Personal experimental Cost Scaler build: independent look and resolution presets, optional prefilter and native resolve.";
 
 struct KeyBinding {
     int vk;
@@ -75,6 +76,8 @@ static float s_resolutionScale  = 0.75f;
 static bool  s_enableAnamorphic = false;
 static float s_scaleX           = 0.65f;
 static float s_scaleY           = 0.85f;
+static int   s_downsampleFilter = 0;
+static bool  s_processAtNativeResolution = false;
 static int   s_enlargementMode  = 1; // 1 = Matched Residual, 0 = Bilinear
 static float s_transferStrength = 1.00f;
 static float s_colorStrength    = 1.00f;
@@ -123,9 +126,10 @@ static void InitSharedMemory() {
     if (g_sharedConfig) return;
     g_hSharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DlssnrSharedConfig), DLSSNR_SHARED_MEM_NAME);
     if (g_hSharedMem) {
+        const bool mappingAlreadyExists = GetLastError() == ERROR_ALREADY_EXISTS;
         g_sharedConfig = (DlssnrSharedConfig*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DlssnrSharedConfig));
         if (g_sharedConfig) {
-            if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            if (!mappingAlreadyExists) {
                 ZeroMemory(g_sharedConfig, sizeof(DlssnrSharedConfig));
                 g_sharedConfig->magic = DLSSNR_MAGIC;
                 g_sharedConfig->version = 1;
@@ -147,6 +151,8 @@ static void InitSharedMemory() {
                 g_sharedConfig->enableAnamorphic = s_enableAnamorphic ? 1 : 0;
                 g_sharedConfig->scaleX = s_scaleX;
                 g_sharedConfig->scaleY = s_scaleY;
+                g_sharedConfig->downsampleFilter = static_cast<uint32_t>(s_downsampleFilter);
+                g_sharedConfig->processAtNativeResolution = s_processAtNativeResolution ? 1 : 0;
                 g_sharedConfig->nrStyle = s_nrStyle;
                 g_sharedConfig->nrIntensity = s_nrIntensity;
                 g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -195,6 +201,8 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->enableAnamorphic = s_enableAnamorphic ? 1 : 0;
     g_sharedConfig->scaleX = s_scaleX;
     g_sharedConfig->scaleY = s_scaleY;
+    g_sharedConfig->downsampleFilter = static_cast<uint32_t>(s_downsampleFilter);
+    g_sharedConfig->processAtNativeResolution = s_processAtNativeResolution ? 1 : 0;
     g_sharedConfig->nrStyle = s_nrStyle;
     g_sharedConfig->nrIntensity = s_nrIntensity;
     g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -231,6 +239,8 @@ static void PullFromSharedMemory() {
         s_enableAnamorphic = (g_sharedConfig->enableAnamorphic != 0);
         s_scaleX = g_sharedConfig->scaleX;
         s_scaleY = g_sharedConfig->scaleY;
+        s_downsampleFilter = g_sharedConfig->downsampleFilter == 1 ? 1 : 0;
+        s_processAtNativeResolution = g_sharedConfig->processAtNativeResolution != 0;
         s_nrStyle = g_sharedConfig->nrStyle;
         s_nrIntensity = g_sharedConfig->nrIntensity;
         s_nrLocalStructureStrength = g_sharedConfig->nrLocalStructureStrength;
@@ -281,6 +291,8 @@ static void LoadIniSettings() {
     if (syVal < 0.25f) syVal = 0.25f;
     if (syVal > 2.00f) syVal = 2.00f;
     s_scaleY = syVal;
+    s_downsampleFilter = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"DownsampleFilter", 0, iniPath.c_str()) == 1 ? 1 : 0;
+    s_processAtNativeResolution = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"ProcessAtNativeResolution", 0, iniPath.c_str()) != 0;
 
     s_enlargementMode = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnlargementMode", 1, iniPath.c_str());
     if (s_enlargementMode != 0 && s_enlargementMode != 1) s_enlargementMode = 1;
@@ -363,6 +375,11 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%.2f", s_scaleY);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleY", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_downsampleFilter);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"DownsampleFilter", buf, iniPath.c_str());
+    swprintf_s(buf, L"%d", s_processAtNativeResolution ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"ProcessAtNativeResolution", buf, iniPath.c_str());
 
     swprintf_s(buf, L"%d", s_enlargementMode);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnlargementMode", buf, iniPath.c_str());
@@ -492,7 +509,7 @@ static const char* GetDxgiFormatString(uint32_t format) {
 
 static void CopyDebugInfoToClipboard() {
     if (!g_sharedConfig || g_sharedConfig->magic != DLSSNR_MAGIC) return;
-    char text[1024];
+    char text[1536];
 
     const char* styleStr = "Balanced";
     if (g_sharedConfig->nrStyle == 1) styleStr = "Sharp";
@@ -513,7 +530,7 @@ static void CopyDebugInfoToClipboard() {
     }
 
     snprintf(text, sizeof(text),
-        "=== DLSS-NR Cost Scaler Diagnostics ===\r\n"
+        "=== Cost Scaler Lab 2026-09-09 Diagnostics ===\r\n"
         "Proxy Status: %s\r\n"
         "Resolution Scale: %s (Work: %ux%u -> Native: %ux%u)\r\n"
         "Resolve Mode: %s\r\n"
@@ -521,6 +538,8 @@ static void CopyDebugInfoToClipboard() {
         "Transfer Strength: %.2f\r\n"
         "Color Strength: %.2f\r\n"
         "Sharpness: %.2f\r\n"
+        "Input Filter: %u (0=legacy, 1=prefilter)\r\n"
+        "Process At Native: %u\r\n"
         "Model Settings: %s\r\n"
         "  - Style: %s (%u)\r\n"
         "  - Intensity: %.2f\r\n"
@@ -544,6 +563,8 @@ static void CopyDebugInfoToClipboard() {
         g_sharedConfig->transferStrength,
         g_sharedConfig->colorStrength,
         g_sharedConfig->sharpness,
+        g_sharedConfig->downsampleFilter,
+        g_sharedConfig->processAtNativeResolution,
         (g_sharedConfig->useCustomNR != 0) ? "Custom Override" : "Caller Passthrough (Default)",
         styleStr, g_sharedConfig->nrStyle,
         g_sharedConfig->nrIntensity,
@@ -574,13 +595,15 @@ static void CopyDebugInfoToClipboard() {
     }
 }
 
+#include "lab_controls.inl"
+
 static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     PollDiskChanges();
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
 
-    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "%s", "DLSS-NR Cost Scaler");
+    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.00f, 1.00f), "%s", "Cost Scaler Lab - 2026-09-09");
     ImGui::SameLine();
     if (s_enableProxy) {
         ImGui::TextColored(ImVec4(0.20f, 0.90f, 0.30f, 1.00f), "%s", "[ACTIVE]");
@@ -589,6 +612,8 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     }
 
     ImGui::Separator();
+
+    DrawLabControls();
 
     if (ImGui::Checkbox("Enable Proxy", &s_enableProxy)) {
         s_dirty = true;
@@ -620,7 +645,7 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
             } else {
                 ImGui::SameLine();
-                ImGui::TextDisabled("(1:1 Native Passthrough)");
+                ImGui::TextDisabled(s_processAtNativeResolution ? "(1:1 Native with look controls)" : "(1:1 Native Passthrough)");
             }
 
             ImGui::TextUnformatted("Quick Presets:");
@@ -724,8 +749,8 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Scales horizontal and vertical resolution independently.\n"
                               "Human peripheral vision is less sensitive to horizontal high-frequency details\n"
-                              "on widescreen displays. For example, 0.65x Horizontal and 0.85x Vertical yields ~45%% neural cost reduction\n"
-                              "with near-native vertical clarity and perfectly consistent frame pacing!");
+                              "on widescreen displays. For example, 0.65x Horizontal and 0.85x Vertical uses about 45%% fewer NR pixels.\n"
+                              "Check frame times, fine detail and camera motion in this game.");
         }
         if (s_enableAnamorphic) {
             ImGui::SameLine();
@@ -783,8 +808,8 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             PushToSharedMemory(1);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Uses native depth buffer to preserve razor-sharp object silhouettes and geometric boundaries,\n"
-                              "preventing low-resolution neural radiance from bleeding across foreground edges.");
+            ImGui::SetTooltip("When suitable native depth is available, reduces the NR edit near depth discontinuities.\n"
+                              "Compare on/off if object edges lose too much of the effect.");
         }
 
         ImGui::Spacing();
@@ -806,7 +831,7 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
                 "  ! WARNING: Alternating frames creates uneven frame pacing (sawtooth delivery).\n"
                 "    Camera motion will feel choppy despite a higher FPS counter.\n"
-                "    Keep OFF for buttery smooth, consistent frame delivery.");
+                "    Keep OFF for the first comparison and check actual frame times.");
         }
     }
 
@@ -1078,10 +1103,10 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD fdwReason, LPVOID) {
             return FALSE;
         LoadIniSettings();
         InitSharedMemory();
-        reshade::register_overlay("DLSS-NR Cost Scaler", DrawOverlay);
+        reshade::register_overlay("Cost Scaler Lab", DrawOverlay);
         break;
     case DLL_PROCESS_DETACH:
-        reshade::unregister_overlay("DLSS-NR Cost Scaler", DrawOverlay);
+        reshade::unregister_overlay("Cost Scaler Lab", DrawOverlay);
         ShutdownSharedMemory();
         reshade::unregister_addon(hModule);
         break;

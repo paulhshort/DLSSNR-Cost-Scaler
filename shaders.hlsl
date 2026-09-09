@@ -9,6 +9,7 @@ cbuffer DownConstants : register(b0)
     uint gSrcHeight;
     uint gDstWidth;
     uint gDstHeight;
+    uint gDownsampleFilter; // 0 = legacy single bilinear tap, 1 = four-tap footprint on shrinking axes
 };
 
 Texture2D<float4>   gDownSource  : register(t0);
@@ -21,9 +22,43 @@ void CS_Downsample(uint3 id : SV_DispatchThreadID)
     if (id.x >= gDstWidth || id.y >= gDstHeight)
         return;
 
-    // Hardware TMU bilinear downsampling (ultra-fast, zero-ALU overhead)
-    float2 uv = (float2(id.xy) + 0.5f) / float2(gDstWidth, gDstHeight);
-    gDownTarget[id.xy] = gDownSource.SampleLevel(gLinearClamp, uv, 0);
+    // Mode 0: legacy path. Keep this exact single bilinear tap for default behavior and A/B tests.
+    float2 dstSize = float2(gDstWidth, gDstHeight);
+    float2 uv = (float2(id.xy) + 0.5f) / dstSize;
+
+    if (gDownsampleFilter == 0 || (gSrcWidth <= gDstWidth && gSrcHeight <= gDstHeight))
+    {
+        gDownTarget[id.xy] = gDownSource.SampleLevel(gLinearClamp, uv, 0);
+        return;
+    }
+
+    // Mode 1: low-cost footprint approximation for reduced NR inputs.
+    // One destination texel covers 1 / dstSize in source UV space. Offset by one quarter of that
+    // footprint only on axes that shrink, so native/upscale axes preserve legacy sampling.
+    float2 quarterFootprint = 0.25f / dstSize;
+    float offsetX = (gSrcWidth  > gDstWidth)  ? quarterFootprint.x : 0.0f;
+    float offsetY = (gSrcHeight > gDstHeight) ? quarterFootprint.y : 0.0f;
+
+    if (offsetX == 0.0f)
+    {
+        gDownTarget[id.xy] = 0.5f * (
+            gDownSource.SampleLevel(gLinearClamp, uv + float2(0.0f, -offsetY), 0) +
+            gDownSource.SampleLevel(gLinearClamp, uv + float2(0.0f,  offsetY), 0));
+    }
+    else if (offsetY == 0.0f)
+    {
+        gDownTarget[id.xy] = 0.5f * (
+            gDownSource.SampleLevel(gLinearClamp, uv + float2(-offsetX, 0.0f), 0) +
+            gDownSource.SampleLevel(gLinearClamp, uv + float2( offsetX, 0.0f), 0));
+    }
+    else
+    {
+        gDownTarget[id.xy] = 0.25f * (
+            gDownSource.SampleLevel(gLinearClamp, uv + float2(-offsetX, -offsetY), 0) +
+            gDownSource.SampleLevel(gLinearClamp, uv + float2( offsetX, -offsetY), 0) +
+            gDownSource.SampleLevel(gLinearClamp, uv + float2(-offsetX,  offsetY), 0) +
+            gDownSource.SampleLevel(gLinearClamp, uv + float2( offsetX,  offsetY), 0));
+    }
 }
 
 

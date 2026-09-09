@@ -13,3 +13,6 @@
 *.user
 *.suo
 *.zip
+
+# Personal lab build artifacts
+/out/

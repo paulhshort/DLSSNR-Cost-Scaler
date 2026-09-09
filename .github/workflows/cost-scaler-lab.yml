@@ -1,0 +1,33 @@
+name: Cost Scaler Lab
+
+on:
+  push:
+    branches: ['lab/*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Build, CPU tests, software shader tests and package
+        shell: pwsh
+        run: ./scripts/Build-Lab.ps1
+      - name: Retain build and validation evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: cost-scaler-lab-${{ github.sha }}
+          path: |
+            out/*.zip
+            out/*.sha256
+            out/*.log
+            out/*.json
+          if-no-files-found: error
+          retention-days: 30
