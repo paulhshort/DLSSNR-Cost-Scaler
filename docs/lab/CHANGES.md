@@ -10,6 +10,7 @@ Personal branch based on upstream v1.0.5 commit `9bb03663d690b84ec00cdb55fb3a1a0
 - Added a lab-specific configuration mapping and one canonical shared header. Install the lab proxy and lab companion as a pair.
 - Added routing tests, look/resolution isolation tests, installer tests, shader reflection checks, and software shader tests. Fresh FXC output must match both embedded shader headers before packaging.
 - Added an upgrade/restore helper that preserves the working INI, model, ShortFuse, and ReShade. The helper only installs into an identified existing Cost Scaler setup.
+- Corrected the depth status label: a detected buffer does not prove active edge protection. Aligned the companion's missing-key depth default with the proxy.
 
 The original resolve shader is unchanged. Greater transfer amplifies its existing edit, including unwanted changes. The optional input filter operates in the caller's image values; it does not establish linear-light HDR processing or guarantee less shimmer in a game.
 

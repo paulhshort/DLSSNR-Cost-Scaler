@@ -142,6 +142,52 @@ void require_close(const std::vector<Float4>& got, const std::vector<Float4>& ex
     }
 }
 
+void require_close_under_sampler_precision(const std::vector<Float4>& got, const std::vector<Float4>& expected,
+                                           const std::vector<Float4>& source, uint32_t sw, uint32_t sh,
+                                           const char* label) {
+    check(got.size() == expected.size(), "size mismatch");
+
+    float max_dx[4] = {};
+    float max_dy[4] = {};
+    for (uint32_t y = 0; y < sh; ++y) {
+        for (uint32_t x = 1; x < sw; ++x) {
+            const Float4 a = source[static_cast<size_t>(y) * sw + x - 1];
+            const Float4 b = source[static_cast<size_t>(y) * sw + x];
+            const float da[4] = { std::fabs(a.r - b.r), std::fabs(a.g - b.g), std::fabs(a.b - b.b), std::fabs(a.a - b.a) };
+            for (int c = 0; c != 4; ++c) max_dx[c] = std::max(max_dx[c], da[c]);
+        }
+    }
+    for (uint32_t y = 1; y < sh; ++y) {
+        for (uint32_t x = 0; x < sw; ++x) {
+            const Float4 a = source[static_cast<size_t>(y - 1) * sw + x];
+            const Float4 b = source[static_cast<size_t>(y) * sw + x];
+            const float da[4] = { std::fabs(a.r - b.r), std::fabs(a.g - b.g), std::fabs(a.b - b.b), std::fabs(a.a - b.a) };
+            for (int c = 0; c != 4; ++c) max_dy[c] = std::max(max_dy[c], da[c]);
+        }
+    }
+
+    // D3D11.3 Functional Specification 7.18.16.1 requires at least 8 fractional subtexel bits:
+    // https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm
+    // Compare against ideal float weights with a conservative per-image Lipschitz bound of one
+    // 1/256 subtexel quantum per axis, plus an FP32 margin for these bounded test inputs.
+    // Averaging two/four bilinear samples cannot increase this bound. GPU-to-GPU parity stays strict.
+    constexpr float kSubtexelQuantum = 1.0f / 256.0f;
+    constexpr float kFpMargin = 1.0e-5f;
+    for (size_t i = 0; i < got.size(); ++i) {
+        const float g[4] = { got[i].r, got[i].g, got[i].b, got[i].a };
+        const float e[4] = { expected[i].r, expected[i].g, expected[i].b, expected[i].a };
+        for (int c = 0; c != 4; ++c) {
+            const float bound = kSubtexelQuantum * (max_dx[c] + max_dy[c]) + kFpMargin;
+            const float diff = std::fabs(g[c] - e[c]);
+            if (diff > bound) {
+                std::fprintf(stderr, "FAIL: %s pixel=%zu channel=%d got=%g expected=%g abs=%g bound=%g dx=%g dy=%g\n",
+                    label, i, c, g[c], e[c], diff, bound, max_dx[c], max_dy[c]);
+                std::exit(1);
+            }
+        }
+    }
+}
+
 Float4 px(uint32_t x, uint32_t y, uint32_t w) {
     const float xf = static_cast<float>(x);
     const float yf = static_cast<float>(y);
@@ -520,7 +566,7 @@ void test_filter1_matches_cpu_reference(Harness& h) {
         auto gpu = h.downsample(current_down(), c.sw, c.sh, c.dw, c.dh, 1, src);
         auto cpu = cpu_filter1_reference(src, c.sw, c.sh, c.dw, c.dh);
         require_finite(gpu, c.label);
-        require_close(gpu, cpu, 5.0e-4f, c.label);
+        require_close_under_sampler_precision(gpu, cpu, src, c.sw, c.sh, c.label);
     }
 }
 

@@ -319,7 +319,7 @@ static void LoadIniSettings() {
     s_sharpness = sVal;
 
     s_enableVrnr = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, iniPath.c_str()) != 0);
-    s_enableDepthAware = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 0, iniPath.c_str()) != 0);
+    s_enableDepthAware = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 1, iniPath.c_str()) != 0);
 
     s_nrStyle = GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, iniPath.c_str());
     if (s_nrStyle < 0 || s_nrStyle > 2) s_nrStyle = 0;
@@ -1012,7 +1012,10 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
 
             if (g_sharedConfig->enableDepthAware) {
                 if (g_sharedConfig->debugHasDepth) {
-                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Depth Bilateral:    Active (Guarding Silhouettes)");
+                    ImGui::Text("Depth Bilateral:    Enabled (Buffer Present)");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Buffer presence does not confirm active edge protection.\nThe buffer must also be compatible with this resolve pass.");
+                    }
                 } else {
                     ImGui::TextDisabled("Depth Bilateral:    Enabled (Awaiting Depth Buffer)");
                 }
